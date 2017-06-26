@@ -5,12 +5,54 @@ import getpass
 import socket
 import signal
 import subprocess
+from ast import literal_eval
+from six import PY2
 import platform
+import ptrace.debugger
+import ptrace.syscall
+from ptrace.func_call import FunctionCallOptions
+from ptrace.debugger import ProcessSignal, NewProcessEvent, ProcessExecution, ProcessExit
+from ptrace.syscall import SYSCALL_REGISTER, RETURN_VALUE_REGISTER, DIRFD_ARGUMENTS
+from ptrace.syscall.posix_constants import SYSCALL_ARG_DICT
+from ptrace.syscall.syscall_argument import ARGUMENT_CALLBACK
+from ptrace.tools import locateProgram
 from yosh.constants import *
 from yosh.builtins import *
+from ptrace.debugger.child import createChild
+from yosh.process import Process
+from collections import OrderedDict
+from sys import _getframe
+from yosh.filters import (delete, move, change_permissions, change_owner,    # noqa
+                      create_directory, create_link, create_write_file)  # noqa
+from yosh import SYSCALL_FILTERS
 
 # Hash map to store built-in function name and reference as key and value
 built_in_cmds = {}
+
+# Use of an ordered dictionary ensures that plugin-defined filters
+# (which are registered after built-in filters) are processed last
+# and thus override all built-in filters hooking the same syscall
+# SYSCALL_FILTERS = OrderedDict()
+
+
+def register_filter(syscall, filter_function, filter_scope=None):
+    if filter_scope is None:
+        # Source: http://stackoverflow.com/a/5071539
+        caller_module = _getframe(1).f_globals["__name__"]
+        filter_scope = caller_module.split(".")[-1]
+    if filter_scope not in SYSCALL_FILTERS:
+        SYSCALL_FILTERS[filter_scope] = {}
+    SYSCALL_FILTERS[filter_scope][syscall] = filter_function
+
+
+def parse_argument(argument):
+    # createText() uses repr() to render the argument,
+    # for which literal_eval() acts as an inverse function
+    # (see http://stackoverflow.com/a/24886425)
+    argument = literal_eval(argument.createText())
+    if PY2 and isinstance(argument, str):
+        argument = unicode(argument, sys.getfilesystemencoding())  # noqa
+    return argument
 
 
 def tokenize(string):
@@ -32,7 +74,68 @@ def handler_kill(signum, frame):
     raise OSError("Killed!")
 
 
-def execute(cmd_tokens):
+def manage_process(debugger, syscall_filters):
+    format_options = FunctionCallOptions(
+        replace_socketcall=False,
+        string_max_length=4096,
+    )
+
+    processes = {}
+    operations = []
+
+    while True:
+        if not debugger:
+            # All processes have exited
+            break
+
+        # This logic is mostly based on python-ptrace's "strace" example
+        try:
+            syscall_event = debugger.waitSyscall()
+        except ProcessSignal as event:
+            event.process.syscall(event.signum)
+            continue
+        except NewProcessEvent as event:
+            event.process.syscall()
+            event.process.parent.syscall()
+            continue
+        except ProcessExecution as event:
+            event.process.syscall()
+            continue
+        except ProcessExit as event:
+            continue
+
+        process = syscall_event.process
+        syscall_state = process.syscall_state
+
+        syscall = syscall_state.event(format_options)
+
+        if syscall and syscall_state.next_event == "exit":
+            # Syscall is about to be executed (just switched from "enter" to "exit")
+            print(syscall.format())
+            if syscall.name in syscall_filters:
+
+                filter_function = syscall_filters[syscall.name]
+                if process.pid not in processes:
+                    processes[process.pid] = Process(process)
+                arguments = [parse_argument(argument) for argument in syscall.arguments]
+
+                operation, return_value = filter_function(processes[process.pid], arguments)
+
+                if operation is not None:
+                    operations.append(operation)
+
+                # if return_value is not None:
+                #     # Set invalid syscall number to prevent call execution
+                #     process.setreg(SYSCALL_REGISTER, -1)
+                #     # Substitute return value to make syscall appear to have succeeded
+                #     process.setreg(RETURN_VALUE_REGISTER, return_value)
+                #
+        process.syscall()
+
+    return operations
+
+
+def execute(cmd_tokens, syscall_filters):
     with open(HISTORY_PATH, 'a') as history_file:
         history_file.write(' '.join(cmd_tokens) + os.linesep)
 
@@ -41,6 +144,9 @@ def execute(cmd_tokens):
         cmd_name = cmd_tokens[0]
         cmd_args = cmd_tokens[1:]
 
+        DIRFD_ARGUMENTS.clear()
+        SYSCALL_ARG_DICT.clear()
+        ARGUMENT_CALLBACK.clear()
         # If the command is a built-in command,
         # invoke its function with arguments
         if cmd_name in built_in_cmds:
@@ -48,19 +154,40 @@ def execute(cmd_tokens):
 
         # Wait for a kill signal
         signal.signal(signal.SIGINT, handler_kill)
+
         # Spawn a child process
-        if platform.system() != "Windows":
-            # Unix support
-            p = subprocess.Popen(cmd_tokens)
-            # Parent process read data from child process
-            # and wait for child process to exit
-            p.communicate()
-        else:
-            # Windows support
-            command = ""
-            for i in cmd_tokens:
-                command = command + " " + i
-            os.system(command)
+        # p = subprocess.Popen(cmd_tokens)
+
+        try:
+            cmd_tokens[0] = locateProgram(cmd_tokens[0])
+            pid = createChild(cmd_tokens, False)
+        except Exception as error:
+            print("Error %s executing %s" % (error, cmd_name))
+            return 1
+
+        debugger = ptrace.debugger.PtraceDebugger()
+        debugger.traceFork()
+        debugger.traceExec()
+
+        process = debugger.addProcess(pid, True)
+        process.syscall()
+
+        try:
+            operations = manage_process(debugger, syscall_filters)
+            print("FOLLOWING OPERATIONS DONE:\n")
+            for operation in operations:
+                print("  " + operation)
+        except Exception as error:
+            print("Error tracing process: %s." % error)
+            return SHELL_STATUS_STOP
+        except KeyboardInterrupt:
+            print("%s terminated by keyboard interrupt." % cmd_name)
+            return SHELL_STATUS_STOP
+        finally:
+            # Cut down all processes no matter what happens
+            # to prevent them from doing any damage
+            debugger.quit()
+
     # Return status indicating to wait for next command in shell_loop
     return SHELL_STATUS_RUN
 
@@ -94,6 +221,12 @@ def ignore_signals():
 
 
 def shell_loop():
+    syscall_filters = {}
+    for filter_scope in SYSCALL_FILTERS:
+        if filter_scope in SYSCALL_FILTERS.keys():
+            for syscall in SYSCALL_FILTERS[filter_scope]:
+                syscall_filters[syscall] = SYSCALL_FILTERS[filter_scope][syscall]
+
     status = SHELL_STATUS_RUN
 
     while status == SHELL_STATUS_RUN:
@@ -111,7 +244,7 @@ def shell_loop():
             # (e.g. convert $<env> into environment value)
             cmd_tokens = preprocess(cmd_tokens)
             # Execute the command and retrieve new status
-            status = execute(cmd_tokens)
+            status = execute(cmd_tokens, syscall_filters)
         except:
             _, err, _ = sys.exc_info()
             print(err)
@@ -135,6 +268,7 @@ def main():
     # Init shell before starting the main loop
     init()
     shell_loop()
+
 
 if __name__ == "__main__":
     main()
