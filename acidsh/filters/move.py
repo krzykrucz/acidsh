@@ -10,7 +10,7 @@
 
 from os.path import dirname, basename
 
-from yosh import register_filter
+from acidsh import register_filter
 
 def filter_move(path_old, path_new):
     if dirname(path_old) == dirname(path_new):
@@ -18,7 +18,7 @@ def filter_move(path_old, path_new):
         path_new = basename(path_new)
     else:
         label = "move"
-    return "%s %s to %s" % (label, path_old, path_new), 0
+    return label, [path_old, path_new], 0
 
 
 register_filter("rename", lambda process, args:

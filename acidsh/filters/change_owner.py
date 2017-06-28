@@ -11,7 +11,7 @@
 from pwd import getpwuid
 from grp import getgrgid
 
-from yosh import register_filter
+from acidsh import register_filter
 
 def filter_change_owner(path, owner, group):
     if owner == -1:
@@ -23,7 +23,7 @@ def filter_change_owner(path, owner, group):
     else:
         label = "change owner"
         owner = getpwuid(owner)[0] + ":" + getgrgid(group)[0]
-    return "%s of %s to %s" % (label, path, owner), 0
+    return label, [path], 0
 
 
 register_filter("chown", lambda process, args:

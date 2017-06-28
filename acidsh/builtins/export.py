@@ -1,5 +1,5 @@
 import os
-from yosh.constants import *
+from acidsh.constants import *
 
 
 def export(args):

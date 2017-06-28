@@ -1,4 +1,4 @@
-from yosh.constants import *
+from acidsh.constants import *
 
 
 def exit(args):

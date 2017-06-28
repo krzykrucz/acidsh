@@ -12,14 +12,14 @@ from os.path import exists
 from os import O_WRONLY, O_RDWR, O_APPEND, O_CREAT, O_TRUNC
 from stat import S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK
 
-from yosh import register_filter
+from acidsh import register_filter
 
 allowed_files = {"/dev/null", "/dev/zero", "/dev/tty"}
 
 
 def filter_open(process, path, flags):
     if path in allowed_files:
-        return None, None
+        return None, [], None
     if (flags & O_CREAT) and not exists(path):
         operation = "%s %s" % ("create file", path)
     elif (flags & O_TRUNC) and exists(path):
@@ -31,12 +31,12 @@ def filter_open(process, path, flags):
         return_value = process.register_path(path)
     else:
         return_value = None
-    return operation, return_value
+    return operation, [] if operation is None else [path], return_value
 
 
 def filter_mknod(path, type):
     if exists(path):
-        return None, None
+        return None, [], None
     elif (type & S_IFCHR):
         label = "create character special file"
     elif (type & S_IFBLK):
@@ -48,23 +48,23 @@ def filter_mknod(path, type):
     else:
         # mknod(2): "Zero file type is equivalent to type S_IFREG"
         label = "create file"
-    return "%s %s" % (label, path), 0
+    return label, [path], 0
 
 
 def filter_write(process, file_descriptor, byte_count):
     if process.is_tracked_descriptor(file_descriptor):
         path = process.descriptor_path(file_descriptor)
-        return "%s %s to %s" % ("write", T.bold("%d bytes" % byte_count), path), byte_count
+        return "write %d bytes" % byte_count, [path], byte_count
     else:
-        return None, None
+        return None, [], None
 
 
 def filter_dup(process, file_descriptor_old, file_descriptor_new=None):
     if process.is_tracked_descriptor(file_descriptor_old):
         # Copy tracked file descriptor
-        return None, process.register_path(process.descriptor_path(file_descriptor_old), file_descriptor_new)
+        return None, [], process.register_path(process.descriptor_path(file_descriptor_old), file_descriptor_new)
     else:
-        return None, None
+        return None, [], None
 
 
 register_filter("open", lambda process, args:

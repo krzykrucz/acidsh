@@ -8,10 +8,11 @@
 # (https://gnu.org/licenses/gpl.html)
 
 
-from yosh import register_filter
+from acidsh import register_filter
+
 
 def filter_delete(path):
-    return "%s %s" % ("delete", path), 0
+    return "delete", [path], 0
 
 
 register_filter("unlink", lambda process, args: filter_delete(process.full_path(args[0])))

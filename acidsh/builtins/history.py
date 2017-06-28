@@ -1,6 +1,6 @@
 import os
 import sys
-from yosh.constants import *
+from acidsh.constants import *
 
 
 def history(args):

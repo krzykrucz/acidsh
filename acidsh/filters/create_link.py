@@ -8,11 +8,11 @@
 # (https://gnu.org/licenses/gpl.html)
 
 
-from yosh import register_filter
+from acidsh import register_filter
 
 def filter_create_link(path_source, path_target, symbolic):
     label = "create symbolic link" if symbolic else "create hard link"
-    return "%s from %s to %s" % (label, path_source, path_target), 0
+    return label, [path_source, path_target], 0
 
 
 register_filter("link", lambda process, args:

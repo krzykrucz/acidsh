@@ -8,10 +8,11 @@
 # (https://gnu.org/licenses/gpl.html)
 
 
-from yosh import register_filter
+from acidsh import register_filter
+
 
 def filter_create_directory(path):
-    return "%s %s" % ("create directory", path), 0
+    return "create directory", [path], 0
 
 
 register_filter("mkdir", lambda process, args:

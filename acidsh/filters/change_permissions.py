@@ -8,7 +8,8 @@
 # (https://gnu.org/licenses/gpl.html)
 
 
-from yosh import register_filter
+from acidsh import register_filter
+
 
 def format_permissions(permissions):
     result = ""
@@ -20,8 +21,7 @@ def format_permissions(permissions):
 
 
 def filter_change_permissions(path, permissions):
-    return "%s of %s to %s" % ("change permissions", path,
-                               format_permissions(permissions)), 0
+    return "change permissions", [path], 0
 
 
 register_filter("chmod", lambda process, args:

@@ -16,23 +16,19 @@ from ptrace.syscall import SYSCALL_REGISTER, RETURN_VALUE_REGISTER, DIRFD_ARGUME
 from ptrace.syscall.posix_constants import SYSCALL_ARG_DICT
 from ptrace.syscall.syscall_argument import ARGUMENT_CALLBACK
 from ptrace.tools import locateProgram
-from yosh.constants import *
-from yosh.builtins import *
+from acidsh.constants import *
+from acidsh.builtins import *
 from ptrace.debugger.child import createChild
-from yosh.process import Process
+from acidsh.process import Process
+from acidsh.snapshot import Snapshot, Snapshots
 from collections import OrderedDict
 from sys import _getframe
-from yosh.filters import (delete, move, change_permissions, change_owner,    # noqa
-                      create_directory, create_link, create_write_file)  # noqa
-from yosh import SYSCALL_FILTERS
+from acidsh.filters import (delete, move, change_permissions, change_owner,  # noqa
+                          create_directory, create_link, create_write_file)  # noqa
+from acidsh import SYSCALL_FILTERS
 
 # Hash map to store built-in function name and reference as key and value
 built_in_cmds = {}
-
-# Use of an ordered dictionary ensures that plugin-defined filters
-# (which are registered after built-in filters) are processed last
-# and thus override all built-in filters hooking the same syscall
-# SYSCALL_FILTERS = OrderedDict()
 
 
 def register_filter(syscall, filter_function, filter_scope=None):
@@ -74,7 +70,7 @@ def handler_kill(signum, frame):
     raise OSError("Killed!")
 
 
-def manage_process(debugger, syscall_filters):
+def debug_process(debugger, syscall_filters):
     format_options = FunctionCallOptions(
         replace_socketcall=False,
         string_max_length=4096,
@@ -82,6 +78,8 @@ def manage_process(debugger, syscall_filters):
 
     processes = {}
     operations = []
+    exit_code = 0
+    snapshots = Snapshots()
 
     while True:
         if not debugger:
@@ -102,6 +100,7 @@ def manage_process(debugger, syscall_filters):
             event.process.syscall()
             continue
         except ProcessExit as event:
+            exit_code = event.exitcode
             continue
 
         process = syscall_event.process
@@ -111,7 +110,7 @@ def manage_process(debugger, syscall_filters):
 
         if syscall and syscall_state.next_event == "exit":
             # Syscall is about to be executed (just switched from "enter" to "exit")
-            print(syscall.format())
+            # print(syscall.format())
             if syscall.name in syscall_filters:
 
                 filter_function = syscall_filters[syscall.name]
@@ -119,20 +118,16 @@ def manage_process(debugger, syscall_filters):
                     processes[process.pid] = Process(process)
                 arguments = [parse_argument(argument) for argument in syscall.arguments]
 
-                operation, return_value = filter_function(processes[process.pid], arguments)
+                name, paths, return_value = filter_function(processes[process.pid], arguments)
 
-                if operation is not None:
-                    operations.append(operation)
+                if name is not None:
+                    operations.append(name)
+                    for path in paths:
+                        snapshots.snapshot_path(path)
 
-                # if return_value is not None:
-                #     # Set invalid syscall number to prevent call execution
-                #     process.setreg(SYSCALL_REGISTER, -1)
-                #     # Substitute return value to make syscall appear to have succeeded
-                #     process.setreg(RETURN_VALUE_REGISTER, return_value)
-                #
         process.syscall()
 
-    return operations
+    return snapshots, exit_code
 
 
 def execute(cmd_tokens, syscall_filters):
@@ -155,10 +150,8 @@ def execute(cmd_tokens, syscall_filters):
         # Wait for a kill signal
         signal.signal(signal.SIGINT, handler_kill)
 
-        # Spawn a child process
-        # p = subprocess.Popen(cmd_tokens)
-
         try:
+            # Spawn a child process
             cmd_tokens[0] = locateProgram(cmd_tokens[0])
             pid = createChild(cmd_tokens, False)
         except Exception as error:
@@ -172,11 +165,12 @@ def execute(cmd_tokens, syscall_filters):
         process = debugger.addProcess(pid, True)
         process.syscall()
 
+        snapshots = None
         try:
-            operations = manage_process(debugger, syscall_filters)
-            print("FOLLOWING OPERATIONS DONE:\n")
-            for operation in operations:
-                print("  " + operation)
+            snapshots, exit_code = debug_process(debugger, syscall_filters)
+            if exit_code != 0:
+                print('Command unsuccessful - rollbacking changes')
+                snapshots.rollback_all()
         except Exception as error:
             print("Error tracing process: %s." % error)
             return SHELL_STATUS_STOP
@@ -187,6 +181,9 @@ def execute(cmd_tokens, syscall_filters):
             # Cut down all processes no matter what happens
             # to prevent them from doing any damage
             debugger.quit()
+            if snapshots is not None:
+                snapshots.clean()
+
 
     # Return status indicating to wait for next command in shell_loop
     return SHELL_STATUS_RUN
